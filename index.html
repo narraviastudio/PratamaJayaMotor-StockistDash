@@ -1,27 +1,3 @@
-Conversation Log
-gue pengen ketika gue ngisi data, dimanapun datanya syncron soalnya pas gue buka di tab datanya ga sama kayak di laptop, krn ada mode lokalnya
-
-Penyebab data di tablet dan laptop tidak sinkron adalah karena pada kode aslinya, fungsi initFirebaseMultiDeviceSync() bergantung pada variabel __firebase_config (yang hanya tersedia di lingkungan preview bawaan tempat kode dibuat). Saat dibuka di browser secara mandiri (di laptop maupun tab), __firebase_config bernilai undefined, sehingga aplikasi langsung masuk ke Mode Lokal (localStorage yang terpisah per perangkat).
-
-File yang sudah diperbarui telah disimpan di index.html. (Disarankan menetapkan folder C:\Users\user\.gemini\antigravity\scratch\pratama-jaya-motor sebagai active workspace agar mudah dikelola ke depannya.)
-
-Perubahan yang Diterapkan
-Panel Pengaturan Cloud Sync (openCloudSyncSettingsModal): Badge status di header sekarang bisa diklik (beserta banner pengingat saat masih Mode Lokal) untuk memasukkan firebaseConfig secara langsung dan mengatur Kode Sinkronisasi Toko (default: pratama-jaya-motor-utama).
-Opsi Hardcode Config (MANUAL_FIREBASE_CONFIG): Di dalam index.html, tersedia konstanta MANUAL_FIREBASE_CONFIG jika ingin menanamkan konfigurasi Firebase langsung di kode agar semua perangkat otomatis terhubung tanpa pengaturan ulang.
-Salin Link Sync untuk Tab / HP (copyCloudSyncShareLink): Menghasilkan link dengan parameter #sync=... yang otomatis membaca dan menyimpan konfigurasi saat dibuka di tablet atau HP.
-Koneksi Firestore Lebih Tahan Error & Anti-Timpa:
-signInAnonymously kini bersifat best-effort, sehingga jika Firestore menggunakan Test Mode dan Anonymous Auth belum diaktifkan di Firebase Console, sinkronisasi tetap berjalan dan pesan error spesifik ditampilkan di modal bila ditolak (permission-denied).
-Penanda CLOUD_EVER_SYNCED_KEY mencegah perangkat yang baru dibuka menimpa perubahan terbaru dari Cloud (seperti pengosongan qty atau penghapusan item).
-Sinkronisasi Antar-Tab Browser: Ditambahkan BroadcastChannel (pjm_tab_sync_v1) dan listener storage agar beberapa tab di perangkat yang sama ikut sinkron seketika.
-Cara Mengaktifkan Sinkronisasi Laptop ↔ Tab (Sekali Setup)
-Buat project gratis di Firebase Console (console.firebase.google.com) → masuk ke Build → Firestore Database → Create database → Start in test mode.
-Buka Project Settings → buat Web App (</>) → salin objek firebaseConfig.
-Buka aplikasi index.html (untuk pemakaian lintas laptop & tablet, disarankan mengunggah file ini ke hosting gratis seperti Netlify Drop, Vercel, atau GitHub Pages agar bisa dibuka lewat URL yang sama dan fitur kamera berjalan normal).
-Klik badge Mode Lokal (Klik Atur) di bagian atas → tempel firebaseConfig → klik Simpan & Hubungkan.
-Klik Salin Link Konfigurasi untuk Tab / HP, lalu buka link tersebut di tablet agar otomatis terhubung ke database Cloud yang sama. (Atau langsung tempel firebaseConfig ke MANUAL_FIREBASE_CONFIG di kode sebelum upload ke hosting.)
-
-Catatan verifikasi: Pemeriksaan sintaks dengan Node CLI tidak dapat dijalankan di sesi ini karena node tidak tersedia di environment; seluruh bagian modul dan UI telah diperiksa langsung melalui file index.html.
-
         }
         // =========================================================================
         // HELPER KEAMANAN STRING HTML
