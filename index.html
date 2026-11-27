@@ -149,10 +149,15 @@
 
                         <!-- Tipografi Judul PRATAMA JAYA MOTOR -->
                         <div class="min-w-0">
-                            <div class="flex items-center gap-1.5">
-                                <span class="text-[10px] sm:text-xs font-extrabold tracking-[0.2em] text-brand-red uppercase">OIL &amp; REPAIR</span>
-                            </div>
                             <div class="flex items-center gap-1.5 flex-wrap">
+                                <span class="text-[10px] sm:text-xs font-extrabold tracking-[0.2em] text-brand-red uppercase">OIL &amp; REPAIR</span>
+                                <!-- Indikator Status Sinkronisasi Cloud Lintas Device -->
+                                <span id="cloudSyncBadge" onclick="manualForceCloudSync()" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 cursor-pointer hover:bg-slate-200/80 transition" title="Ketuk untuk sinkronisasi ulang data lintas perangkat">
+                                    <span id="cloudSyncDot" class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                                    <span id="cloudSyncText">Menghubungkan...</span>
+                                </span>
+                            </div>
+                            <div class="flex items-center gap-1.5 flex-wrap mt-0.5">
                                 <h1 class="text-lg sm:text-2xl font-black tracking-tight text-[#111827] leading-none">PRATAMA</h1>
                                 <span class="bg-brand-red text-white text-sm sm:text-xl font-black px-2 py-0.5 rounded-md tracking-tight leading-none shadow-2xs">JAYA</span>
                             </div>
@@ -1128,7 +1133,7 @@
             </div>
             <div class="p-5 space-y-3.5">
                 <p class="text-xs text-slate-600 leading-relaxed">
-                    Simpan cadangan seluruh stok rak, foto produk, kategori, dan riwayat restock ke file <strong>.JSON</strong> agar aman dipindahkan ke HP atau browser lain.
+                    Data otomatis tersinkronisasi lintas device via Cloud. Anda juga dapat menyimpan cadangan seluruh stok rak, foto produk, kategori, dan riwayat restock ke file <strong>.JSON</strong>.
                 </p>
                 <button type="button" onclick="exportBackupJson()" class="w-full py-3.5 px-4 bg-[#111827] hover:bg-slate-800 text-white font-extrabold rounded-xl text-sm flex items-center justify-center gap-2 transition cursor-pointer">
                     <i class="ph-bold ph-download-simple text-lg text-emerald-400"></i>
@@ -1150,6 +1155,293 @@
             <span id="toastMessage" class="leading-snug">Berhasil diperbarui</span>
         </div>
     </div>
+
+    <!-- ===================================================================== -->
+    <!-- FIREBASE CLOUD REAL-TIME SYNC MODULE (LINTAS DEVICE / MULTI-PERANGKAT)-->
+    <!-- ===================================================================== -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const CLOUD_COLLECTION = 'pjm_shared_rack_v1';
+        const META_DOC_ID = 'store_metadata';
+        const LOGS_DOC_ID = 'restock_history';
+        const LOGO_DOC_ID = 'store_branding';
+
+        let db = null;
+        let auth = null;
+        let currentUser = null;
+        let appId = typeof __app_id !== 'undefined' ? __app_id : 'pratama-jaya-motor-default';
+        let isApplyingRemoteSnapshot = false;
+        let isCloudReady = false;
+        let cloudSyncTimer = null;
+
+        function updateSyncStatusBadge(state, label) {
+            const badge = document.getElementById('cloudSyncBadge');
+            const dot = document.getElementById('cloudSyncDot');
+            const text = document.getElementById('cloudSyncText');
+            if (!badge || !dot || !text) return;
+
+            text.textContent = label;
+            if (state === 'synced') {
+                badge.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-pointer hover:bg-emerald-100/80 transition';
+                dot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-500';
+            } else if (state === 'syncing') {
+                badge.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200 cursor-pointer transition';
+                dot.className = 'w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping';
+            } else {
+                badge.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 cursor-pointer hover:bg-slate-200/80 transition';
+                dot.className = 'w-1.5 h-1.5 rounded-full bg-slate-400';
+            }
+        }
+
+        function getPublicColRef() {
+            return collection(db, 'artifacts', appId, 'public', 'data', CLOUD_COLLECTION);
+        }
+
+        function getPublicDocRef(docId) {
+            return doc(db, 'artifacts', appId, 'public', 'data', CLOUD_COLLECTION, docId);
+        }
+
+        // Memecah inventory ke beberapa chunk dokumen agar foto-foto tetap muat aman di batas 1MB Firestore
+        function buildInventoryChunks(inventoryList) {
+            const chunks = [];
+            let currentBatch = [];
+            let currentSize = 0;
+            const MAX_CHUNK_BYTES = 550000; // ~550KB per dokumen agar sangat aman dari limit 1MB
+
+            for (const item of inventoryList) {
+                const serialized = JSON.stringify(item);
+                const itemBytes = serialized.length * 2;
+                if (currentBatch.length > 0 && (currentSize + itemBytes > MAX_CHUNK_BYTES)) {
+                    chunks.push(currentBatch);
+                    currentBatch = [item];
+                    currentSize = itemBytes;
+                } else {
+                    currentBatch.push(item);
+                    currentSize += itemBytes;
+                }
+            }
+            if (currentBatch.length > 0) {
+                chunks.push(currentBatch);
+            }
+            return chunks;
+        }
+
+        async function pushLocalStateToCloud(customLogoOverride = undefined) {
+            if (!db || !currentUser || isApplyingRemoteSnapshot) return;
+            updateSyncStatusBadge('syncing', 'Menyimpan...');
+
+            try {
+                const state = window.getAppStateSnapshot ? window.getAppStateSnapshot() : null;
+                if (!state) return;
+
+                const chunks = buildInventoryChunks(state.oilInventory || []);
+                const chunkCount = chunks.length;
+
+                // Simpan masing-masing chunk item beserta foto produknya
+                for (let idx = 0; idx < chunkCount; idx++) {
+                    await setDoc(getPublicDocRef(`inventory_chunk_${idx}`), {
+                        chunkIndex: idx,
+                        itemsJson: JSON.stringify(chunks[idx]),
+                        updatedAt: Date.now()
+                    });
+                }
+
+                // Simpan metadata (oilTypes, oilBrands, chunkCount)
+                await setDoc(getPublicDocRef(META_DOC_ID), {
+                    oilTypes: state.oilTypes || [],
+                    oilBrands: state.oilBrands || [],
+                    chunkCount: chunkCount,
+                    totalItems: (state.oilInventory || []).length,
+                    updatedAt: Date.now()
+                });
+
+                // Simpan riwayat restock
+                await setDoc(getPublicDocRef(LOGS_DOC_ID), {
+                    logsJson: JSON.stringify((state.restockLogs || []).slice(0, 150)),
+                    updatedAt: Date.now()
+                });
+
+                // Simpan logo toko jika ada
+                const logoToSave = customLogoOverride !== undefined ? customLogoOverride : state.logo;
+                if (logoToSave) {
+                    await setDoc(getPublicDocRef(LOGO_DOC_ID), {
+                        logoDataUrl: logoToSave,
+                        updatedAt: Date.now()
+                    });
+                }
+
+                updateSyncStatusBadge('synced', 'Tersinkron Cloud');
+            } catch (err) {
+                console.error('Gagal sinkronisasi ke Cloud:', err);
+                updateSyncStatusBadge('offline', 'Tersimpan Lokal');
+            }
+        }
+
+        function scheduleCloudSync(customLogoOverride = undefined) {
+            if (!isCloudReady || isApplyingRemoteSnapshot) return;
+            clearTimeout(cloudSyncTimer);
+            cloudSyncTimer = setTimeout(() => {
+                pushLocalStateToCloud(customLogoOverride);
+            }, 350);
+        }
+
+        function applyCloudSnapshotToLocal(docsMap) {
+            const metaDoc = docsMap.get(META_DOC_ID);
+            if (!metaDoc) return false;
+
+            const chunkCount = Number(metaDoc.chunkCount || 0);
+            let combinedInventory = [];
+            for (let i = 0; i < chunkCount; i++) {
+                const cDoc = docsMap.get(`inventory_chunk_${i}`);
+                if (cDoc && cDoc.itemsJson) {
+                    try {
+                        const parsedChunk = JSON.parse(cDoc.itemsJson);
+                        if (Array.isArray(parsedChunk)) {
+                            combinedInventory = combinedInventory.concat(parsedChunk);
+                        }
+                    } catch (e) {}
+                }
+            }
+
+            // Jika cloud punya metadata tapi chunk belum lengkap, tunggu snapshot berikutnya
+            if (chunkCount > 0 && combinedInventory.length === 0) return false;
+
+            const logsDoc = docsMap.get(LOGS_DOC_ID);
+            let parsedLogs = [];
+            if (logsDoc && logsDoc.logsJson) {
+                try {
+                    const arr = JSON.parse(logsDoc.logsJson);
+                    if (Array.isArray(arr)) parsedLogs = arr;
+                } catch (e) {}
+            }
+
+            const logoDoc = docsMap.get(LOGO_DOC_ID);
+            const remoteLogo = logoDoc && logoDoc.logoDataUrl ? logoDoc.logoDataUrl : null;
+
+            isApplyingRemoteSnapshot = true;
+            try {
+                if (window.applyRemoteCloudState) {
+                    window.applyRemoteCloudState({
+                        oilTypes: Array.isArray(metaDoc.oilTypes) ? metaDoc.oilTypes : null,
+                        oilBrands: Array.isArray(metaDoc.oilBrands) ? metaDoc.oilBrands : null,
+                        oilInventory: combinedInventory,
+                        restockLogs: parsedLogs,
+                        logo: remoteLogo
+                    });
+                }
+            } finally {
+                isApplyingRemoteSnapshot = false;
+            }
+            return true;
+        }
+
+        async function initFirebaseMultiDeviceSync() {
+            try {
+                if (typeof __firebase_config === 'undefined' || !__firebase_config) {
+                    updateSyncStatusBadge('offline', 'Mode Lokal');
+                    return;
+                }
+
+                const firebaseConfig = JSON.parse(__firebase_config);
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // RULE 3: Auth wajib selesai sebelum query Firestore
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                currentUser = auth.currentUser;
+                if (!currentUser) {
+                    await new Promise((resolve) => {
+                        const unsub = onAuthStateChanged(auth, (u) => {
+                            if (u) {
+                                currentUser = u;
+                                unsub();
+                                resolve();
+                            }
+                        });
+                    });
+                }
+
+                // Cek apakah data sudah ada di Cloud
+                const initialSnap = await getDocs(getPublicColRef());
+                const docsMap = new Map();
+                initialSnap.forEach(d => docsMap.set(d.id, d.data()));
+
+                const hasCloudData = docsMap.has(META_DOC_ID) && Number(docsMap.get(META_DOC_ID).totalItems || 0) > 0;
+
+                if (hasCloudData) {
+                    // Gabungkan: pertahankan foto atau qty lokal jika di cloud belum terisi, lalu terapkan data cloud
+                    const localState = window.getAppStateSnapshot ? window.getAppStateSnapshot() : null;
+                    applyCloudSnapshotToLocal(docsMap);
+
+                    // Cek apakah localStorage sebelumnya punya foto/qty yang belum ada di cloud (migrasi aman)
+                    if (localState && Array.isArray(localState.oilInventory) && window.mergeMissingLocalPhotosAndQty) {
+                        const didMergeLocal = window.mergeMissingLocalPhotosAndQty(localState);
+                        isCloudReady = true;
+                        if (didMergeLocal) {
+                            await pushLocalStateToCloud(localState.logo);
+                        }
+                    } else {
+                        isCloudReady = true;
+                    }
+                    updateSyncStatusBadge('synced', 'Tersinkron Cloud');
+                } else {
+                    // Cloud masih kosong -> migrasikan seluruh data & foto dari localStorage browser ini ke Cloud
+                    isCloudReady = true;
+                    await pushLocalStateToCloud();
+                    updateSyncStatusBadge('synced', 'Tersinkron Cloud');
+                }
+
+                // Listener Real-Time lintas device (HP / Laptop lain langsung update otomatis)
+                onSnapshot(
+                    getPublicColRef(),
+                    (snapshot) => {
+                        if (snapshot.metadata.hasPendingWrites) return;
+                        const liveMap = new Map();
+                        snapshot.forEach(d => liveMap.set(d.id, d.data()));
+                        if (liveMap.has(META_DOC_ID)) {
+                            applyCloudSnapshotToLocal(liveMap);
+                            updateSyncStatusBadge('synced', 'Tersinkron Cloud');
+                        }
+                    },
+                    (error) => {
+                        console.error('Error listener real-time Firestore:', error);
+                        updateSyncStatusBadge('offline', 'Mode Lokal');
+                    }
+                );
+            } catch (err) {
+                console.error('Inisialisasi Cloud Sync gagal:', err);
+                updateSyncStatusBadge('offline', 'Mode Lokal');
+            }
+        }
+
+        // Ekspos hook global untuk dipanggil oleh fungsi saveAllState & upload logo
+        window.triggerCloudSync = scheduleCloudSync;
+        window.manualForceCloudSync = async function () {
+            if (!db || !currentUser) {
+                if (window.showToast) window.showToast('Menyinkronkan koneksi cloud...', 'warning');
+                await initFirebaseMultiDeviceSync();
+                return;
+            }
+            await pushLocalStateToCloud();
+            if (window.showToast) window.showToast('Data & foto berhasil disinkronkan ke semua device!');
+        };
+
+        // Jalankan inisialisasi cloud setelah DOM siap
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initFirebaseMultiDeviceSync);
+        } else {
+            initFirebaseMultiDeviceSync();
+        }
+    </script>
 
     <script>
         // =========================================================================
@@ -1324,6 +1616,109 @@
         let showcaseSelectedType = 'ALL';
         let showcaseSelectedBrand = 'ALL';
         let showcaseOnlyReady = false;
+
+        // =========================================================================
+        // BRIDGE SINKRONISASI CLOUD (MENJAGA DATA & FOTO LINTAS DEVICE)
+        // =========================================================================
+        window.getAppStateSnapshot = function () {
+            return {
+                oilTypes: [...oilTypes],
+                oilBrands: [...oilBrands],
+                oilInventory: oilInventory.map(item => ({ ...item })),
+                restockLogs: restockLogs.map(l => ({ ...l })),
+                logo: localStorage.getItem(STORAGE_KEYS.LOGO) || null
+            };
+        };
+
+        window.mergeMissingLocalPhotosAndQty = function (localSnapshot) {
+            if (!localSnapshot || !Array.isArray(localSnapshot.oilInventory)) return false;
+            let changed = false;
+
+            localSnapshot.oilInventory.forEach(localItem => {
+                const idx = oilInventory.findIndex(r =>
+                    r.id === localItem.id ||
+                    (r.type === localItem.type && r.name.toLowerCase() === localItem.name.toLowerCase())
+                );
+                if (idx !== -1) {
+                    if (!oilInventory[idx].image && localItem.image) {
+                        oilInventory[idx].image = localItem.image;
+                        changed = true;
+                    }
+                    if ((oilInventory[idx].qty === null || oilInventory[idx].qty === undefined) && typeof localItem.qty === 'number') {
+                        oilInventory[idx].qty = localItem.qty;
+                        changed = true;
+                    }
+                } else if (localItem.image || typeof localItem.qty === 'number') {
+                    const maxCap = getEffectiveMaxCapacity(localItem);
+                    oilInventory.push({
+                        ...localItem,
+                        maxCapacity: maxCap,
+                        qty: normalizeQty(localItem.qty, maxCap),
+                        image: localItem.image || null
+                    });
+                    changed = true;
+                }
+            });
+
+            if (changed) {
+                persistLocalOnly();
+                renderTypeTabs();
+                renderBrandPills();
+                renderRestockSection();
+                renderDashboard();
+                if (activeMainView === 'showcase') renderShowcaseView();
+            }
+            return changed;
+        };
+
+        window.applyRemoteCloudState = function (remoteData) {
+            if (!remoteData) return;
+
+            if (Array.isArray(remoteData.oilTypes) && remoteData.oilTypes.length > 0) {
+                oilTypes = [...remoteData.oilTypes];
+            }
+            if (Array.isArray(remoteData.oilBrands) && remoteData.oilBrands.length > 0) {
+                oilBrands = [...remoteData.oilBrands];
+            }
+            ensureDefaultCategoriesAndBrands();
+
+            if (Array.isArray(remoteData.oilInventory) && remoteData.oilInventory.length > 0) {
+                // Pertahankan foto lokal sementara jika cloud belum menyimpan foto untuk item tertentu
+                const localPhotoById = new Map();
+                oilInventory.forEach(it => {
+                    if (it.image) localPhotoById.set(it.id, it.image);
+                });
+
+                oilInventory = remoteData.oilInventory.map(item => {
+                    const maxCap = getEffectiveMaxCapacity(item);
+                    return {
+                        ...item,
+                        maxCapacity: maxCap,
+                        qty: normalizeQty(item.qty, maxCap),
+                        image: item.image || localPhotoById.get(item.id) || null
+                    };
+                });
+                syncNewDefaultItemsWithoutOverwriting();
+            }
+
+            if (Array.isArray(remoteData.restockLogs)) {
+                restockLogs = remoteData.restockLogs;
+            }
+
+            if (remoteData.logo) {
+                try {
+                    localStorage.setItem(STORAGE_KEYS.LOGO, remoteData.logo);
+                } catch (e) {}
+                applyLogoImage(remoteData.logo);
+            }
+
+            persistLocalOnly();
+            renderTypeTabs();
+            renderBrandPills();
+            renderRestockSection();
+            renderDashboard();
+            if (activeMainView === 'showcase') renderShowcaseView();
+        };
 
         // =========================================================================
         // NAVIGASI ANTAR DASHBOARD (STOK RAK OLI vs ETALASE PRODUK)
@@ -1857,7 +2252,7 @@
             }
         }
 
-        function saveAllState() {
+        function persistLocalOnly() {
             try {
                 ensureDefaultCategoriesAndBrands();
                 localStorage.setItem(STORAGE_KEYS.INITIALIZED, '1');
@@ -1866,8 +2261,14 @@
                 localStorage.setItem(STORAGE_KEYS.INVENTORY, JSON.stringify(oilInventory));
                 localStorage.setItem(STORAGE_KEYS.RESTOCK_LOGS, JSON.stringify(restockLogs));
             } catch (e) {
-                console.error('Gagal menyimpan data ke browser:', e);
-                showToast('Memori browser penuh. Gunakan foto ukuran lebih kecil.', 'warning');
+                console.error('Gagal menyimpan cache lokal browser:', e);
+            }
+        }
+
+        function saveAllState() {
+            persistLocalOnly();
+            if (typeof window.triggerCloudSync === 'function') {
+                window.triggerCloudSync();
             }
         }
 
@@ -2602,7 +3003,10 @@
                 try {
                     localStorage.setItem(STORAGE_KEYS.LOGO, dataUrl);
                     applyLogoImage(dataUrl);
-                    showToast('Logo toko berhasil diperbarui!');
+                    if (typeof window.triggerCloudSync === 'function') {
+                        window.triggerCloudSync(dataUrl);
+                    }
+                    showToast('Logo toko berhasil diperbarui & tersinkron!');
                 } catch (err) {
                     showToast('Ukuran gambar terlalu besar untuk disimpan', 'warning');
                 }
@@ -3938,21 +4342,24 @@
                     renderRestockSection();
                     renderDashboard();
                     closeBackupRestoreModal();
-                    showToast(`Berhasil memulihkan ${oilInventory.length} item stok!`);
+                    showToast(`Berhasil memulihkan & menyinkronkan ${oilInventory.length} item stok!`);
                 } catch (err) {
-                    showToast('Gagal membaca file backup JSON', 'warning');
+                    showToast('Gagal membaca file backup', 'warning');
                 }
             };
             reader.readAsText(file);
         }
 
         // =========================================================================
-        // HELPER KEAMANAN HTML
+        // HELPER KEAMANAN STRING HTML
         // =========================================================================
         function escapeHtml(str) {
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         function escapeAttr(str) {
@@ -3960,21 +4367,18 @@
         }
 
         // =========================================================================
-        // INISIALISASI APLIKASI SAAT HALAMAN DIMUAT
+        // INISIALISASI SAAT HALAMAN DIMUAT
         // =========================================================================
-        window.onload = function () {
-            loadAllState();
+        window.addEventListener('DOMContentLoaded', () => {
+            updateLiveClock();
+            setInterval(updateLiveClock, 1000);
             loadCustomLogo();
-            renderModalRangeSelectors(7);
+            loadAllState();
             renderTypeTabs();
             renderBrandPills();
             renderRestockSection();
             renderDashboard();
 
-            updateLiveClock();
-            setInterval(updateLiveClock, 1000);
-
-            // Hover & click-outside behavior untuk Floating Hover Action Dock
             const dock = document.getElementById('floatingHoverDock');
             if (dock) {
                 dock.addEventListener('mouseenter', () => {
@@ -3988,18 +4392,13 @@
                     }
                 });
             }
-            document.addEventListener('click', (e) => {
-                if (floatingMenuOpen && dock && !dock.contains(e.target)) {
-                    closeFloatingMenu();
-                }
-            });
 
             window.addEventListener('resize', () => {
                 if (!restockPanelCollapsed) {
                     renderRestockChart();
                 }
             });
-        };
+        });
     </script>
 </body>
 </html>
