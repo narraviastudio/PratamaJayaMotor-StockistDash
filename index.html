@@ -1197,11 +1197,11 @@
         }
 
         function getPublicColRef() {
-            return collection(db, 'artifacts', appId, 'public', 'data', CLOUD_COLLECTION);
+            return collection(db, CLOUD_COLLECTION);
         }
 
         function getPublicDocRef(docId) {
-            return doc(db, 'artifacts', appId, 'public', 'data', CLOUD_COLLECTION, docId);
+            return doc(db, CLOUD_COLLECTION, docId);
         }
 
         // Memecah inventory ke beberapa chunk dokumen agar foto-foto tetap muat aman di batas 1MB Firestore
@@ -1338,14 +1338,21 @@
             return true;
         }
 
+        const FALLBACK_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyA8b9mNiL0UH_rFw9EARCq4MvhYGpldNaA",
+            authDomain: "narravia-studio.firebaseapp.com",
+            projectId: "narravia-studio",
+            storageBucket: "narravia-studio.firebasestorage.app",
+            messagingSenderId: "88190375836",
+            appId: "1:88190375836:web:941622bbd92ce02b5d5a59",
+            measurementId: "G-8ZR0XXNL9F"
+        };
+
         async function initFirebaseMultiDeviceSync() {
             try {
-                if (typeof __firebase_config === 'undefined' || !__firebase_config) {
-                    updateSyncStatusBadge('offline', 'Mode Lokal');
-                    return;
-                }
-
-                const firebaseConfig = JSON.parse(__firebase_config);
+                const firebaseConfig = (typeof __firebase_config !== 'undefined' && __firebase_config)
+                    ? JSON.parse(__firebase_config)
+                    : FALLBACK_FIREBASE_CONFIG;
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
